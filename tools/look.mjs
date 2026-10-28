@@ -418,6 +418,44 @@ function headersFor(cred) {
   return { 'User-Agent': UA, Referer: REF_VIDEO, Cookie: parts.join('; ') }
 }
 
+// ── 抽帧画质（桌面端重构）：默认 360p；需要看清小字/表情细节时可要 480/720/1080 ──
+//   durl（fnval=1）是单文件 mp4，最省事：360 匿名就能拿到，720 不少视频匿名也给；
+//   1080 往往只走 dash（fnval=16，音视频分离）——抽帧不需要音轨，直接取视频流即可。
+const QUALITY_QN = { 360: 16, 480: 32, 720: 64, 1080: 80 }
+const QN_LABEL = { 16: '360p', 32: '480p', 64: '720p', 80: '1080p', 112: '1080p+' }
+
+function normalizeQuality(value) {
+  const n = Number(value)
+  return QUALITY_QN[n] ? n : 0
+}
+
+/**
+ * 解析一个视频的下载直链。
+ * @returns {Promise<{url: string, actualQn: number, dash: boolean} | null>}
+ */
+async function videoSource(v, quality) {
+  const want = normalizeQuality(quality)
+  const qn = want ? QUALITY_QN[want] : 16
+  const headers = headersFor(credFor(null))
+  const durlUrl = `https://api.bilibili.com/x/player/playurl?avid=${v.aid}&cid=${v.cid}&qn=${qn}&fnval=1&fnver=0&fourk=1&platform=pc`
+  const first = await jget(durlUrl, headers)
+  const durl = first?.data?.durl?.[0]?.url
+  const durlQn = Number(first?.data?.quality) || 16
+  // durl 能满足要求就直接用（单文件，最省事）；要 1080 而 durl 只给 720 时才去试 dash。
+  if (durl && (!want || want <= 360 || durlQn >= qn)) return { url: durl, actualQn: durlQn, dash: false }
+  if (qn <= 16) return null
+  const dashUrl = `https://api.bilibili.com/x/player/playurl?avid=${v.aid}&cid=${v.cid}&qn=${qn}&fnval=16&fnver=0&fourk=1&platform=pc`
+  const second = await jget(dashUrl, headers)
+  const list = Array.isArray(second?.data?.dash?.video) ? second.data.dash.video : []
+  const best = list
+    .filter((item) => Number(item.id) <= qn)
+    .sort((a, b) => Number(b.id) - Number(a.id))[0] || list[0]
+  const dashSource = best?.baseUrl || best?.base_url
+  if (dashSource) return { url: dashSource, actualQn: Number(best.id) || 0, dash: true }
+  // dash 也没给：退回 durl 能拿到的最好画质，别让用户什么都拿不到。
+  return durl ? { url: durl, actualQn: durlQn, dash: false } : null
+}
+
 // ── wbi 签名（字幕主通道 x/player/wbi/v2 必需）──────────────────────────
 const MIXIN_KEY_ENC_TAB = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38,
@@ -985,13 +1023,14 @@ async function cmdPeek(bv, opts = {}) {
 
 // B39：抽帧数硬上限——模型传极小 --step 会把磁盘抽爆；预计帧数超此值就直接中止
 //   （2026-10-28 任务#2 参数分层：改成从 tuning() 读 maxFrames，用户可在面板调 100–1000，默认 500）
-async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page = 1, scene = false } = {}) {
+async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page = 1, scene = false, quality = 0 } = {}) {
   const maxFrames = tuning().maxFrames
   const v = await viewOf(bv, page)
   const useStep = step > 0 ? step : autoStep(v.dur)
   // T34-P0-2：时长拿不到（0/异常）时别用 2 秒间隔——3 小时视频会抽几千帧
   // （2026-10-26 批次2 修复：原写法 `? safeStep : Math.max(safeStep,10)` 在 const 初始化里自引用，TDZ 必抛 ReferenceError）
   const safeStep = (v.dur > 0) ? useStep : Math.max(useStep, 10)
+  const wantQuality = normalizeQuality(quality) || 360
   const dirTag = scene ? `scene-${safeStep}s` : `${safeStep}s`
   const dir = outDir || join(CACHE, 'frames', `${bv}-p${v.p}-${dirTag}`)
   // --out 指向用户目录时绝不整目录递归删：只覆盖本工具产物（下面会重下 mp4、清 jpg）
@@ -999,9 +1038,12 @@ async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page
   mkdirSync(dir, { recursive: true })
   const mp4 = join(dir, `${bv}.mp4`)
   const jpgs = () => readdirSync(dir).filter((f) => f.endsWith('.jpg'))
-  // 只有 manifest 说这批帧抽完了才算缓存有效；残帧（中途被打断）会重抽
+  // 只有 manifest 说这批帧抽完了才算缓存有效；残帧（中途被打断）会重抽；画质变了也重抽
   const m0 = readManifest(dir)
-  if (!fresh && m0?.ok && m0.step === safeStep && m0.scene === scene && jpgs().length > 0) return { dir, mp4, cached: true, frames: jpgs().length }
+  const sameQuality = (m0?.quality ?? 360) === wantQuality
+  if (!fresh && m0?.ok && m0.step === safeStep && m0.scene === scene && sameQuality && jpgs().length > 0) {
+    return { dir, mp4, cached: true, frames: jpgs().length, quality: m0.quality ?? 360, actualQn: m0.actualQn || QUALITY_QN[m0.quality ?? 360] || 16, dash: Boolean(m0.dash) }
+  }
   // B39：先按 时长/step 估一下要抽多少帧，超 maxFrames 就别下载/解码了
   const estFrames = v.dur > 0 ? Math.ceil(v.dur / safeStep) : 0
   if (estFrames > maxFrames) throw new Error(`抽帧数超上限（预计 ${estFrames} 帧，上限 ${maxFrames}）：请改大 --step`)
@@ -1010,7 +1052,9 @@ async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page
     for (let i = 0; i < 60; i++) {
       await sleep(1000)
       const m = readManifest(dir)
-      if (m?.ok && m.step === safeStep && m.scene === scene && jpgs().length > 0) return { dir, mp4, cached: true, frames: jpgs().length }
+      if (m?.ok && m.step === safeStep && m.scene === scene && (m.quality ?? 360) === wantQuality && jpgs().length > 0) {
+        return { dir, mp4, cached: true, frames: jpgs().length, quality: m.quality ?? 360, actualQn: m.actualQn || QUALITY_QN[m.quality ?? 360] || 16, dash: Boolean(m.dash) }
+      }
     }
     throw new Error('同目录有另一个实例在抽帧，等不到结果')
   }
@@ -1021,14 +1065,11 @@ async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page
         try { rmSync(join(dir, e), { recursive: true, force: true }) } catch {}
       }
     }
-    const p = await jget(
-      `https://api.bilibili.com/x/player/playurl?avid=${v.aid}&cid=${v.cid}&qn=16&fnval=1&platform=html5&fourk=0`,
-    )
-    const url = p?.data?.durl?.[0]?.url
-    if (!url) throw new Error(`playurl 没给直链（code=${p?.code} ${p?.message ?? ''}）`)
+    const src = await videoSource(v, wantQuality)
+    if (!src?.url) throw new Error(`playurl 没给直链（画质 ${wantQuality}p 可能需要登录，或该视频没有这个清晰度）`)
     const bin = findFfmpeg(ffmpeg)
     if (!bin) throw new Error('找不到 ffmpeg：' + FFMPEG_HINT)
-    if (fresh || !existsSync(mp4)) await downloadTo(url, mp4)
+    if (fresh || !existsSync(mp4) || !sameQuality) await downloadTo(src.url, mp4)
     // V1（2026-10-26 DSH 拍板=按 manifest 记账删）：--fresh 只删 manifest.files 里记过的本工具产物，
     //   用户 --out 目录里自己放的 keep.jpg 之类不能碰。老 manifest 没 files 字段时退回命名模式兜底。
     if (fresh) {
@@ -1080,8 +1121,11 @@ async function grabFrames(bv, { step = 0, outDir, ffmpeg, fresh = false, p: page
     if (!n) throw new Error('抽帧没产出图片（可能源流异常）')
     // V1：本次产物的文件名写进 manifest.files，下一轮 --fresh 只按这份清单删
     const produced = jpgs().filter((f) => new RegExp(`^${bv}-\\d+\\.jpg$`).test(f))
-    writeManifest(dir, { ok: true, bv, p: v.p, step: safeStep, scene, sceneTh: scene ? sceneTh : 0, frames: n, files: produced })
-    return { dir, mp4, frames: n, sceneTh: scene ? sceneTh : 0 }
+    writeManifest(dir, {
+      ok: true, bv, p: v.p, step: safeStep, scene, sceneTh: scene ? sceneTh : 0, frames: n, files: produced,
+      quality: wantQuality, actualQn: src.actualQn, dash: src.dash,
+    })
+    return { dir, mp4, frames: n, sceneTh: scene ? sceneTh : 0, quality: wantQuality, actualQn: src.actualQn, dash: src.dash }
   } finally {
     unlock(lock)
   }
@@ -1989,6 +2033,7 @@ async function cmdFrames(bv, opts = {}) {
   if (r.cached) console.log(`  复用上次抽好的 ${r.frames ?? ''} 帧（要重抽加 --fresh；清全部加 clean）`)
   if (opts.scene && r.sceneTh) console.log(`  场景吸附 · 阈值 ${r.sceneTh} · ${r.frames} 个变化点`)
   console.log(`视频: ${r.mp4}`)
+  if (r.actualQn) console.log(`画质: ${QN_LABEL[r.actualQn] || `${r.actualQn}p`}${r.dash ? '（dash 视频流，无音轨）' : ''}`)
   const names = []
   for (const p of frameList(r.dir, bv)) names.push(p)
   console.log(`帧: ${names.length} 张 → ${names.map((p) => basename(p)).join(', ')}`)
@@ -2043,7 +2088,7 @@ async function cmdSheet(bv, opts = {}) {
   if (!cols || !rows) { process.exitCode = 1; console.error('✗ 格子格式应是 3x3 / 4x4'); return }
   const n = cols * rows
   console.log(`九宫格 ${bv}（${grid}，从抽帧里均匀挑 ${n} 张拼一张图）`)
-  const r = await grabFrames(bv, { step: opts.step ?? 0, p: opts.p ?? 1, ffmpeg: opts.ffmpeg, fresh: opts.fresh })
+  const r = await grabFrames(bv, { step: opts.step ?? 0, p: opts.p ?? 1, ffmpeg: opts.ffmpeg, fresh: opts.fresh, quality: opts.quality })
   const files = frameList(r.dir, bv)
   if (!files.length) { process.exitCode = 1; console.error('✗ 没抽到帧'); return }
   const picked = pickEven(files, n)
@@ -2061,6 +2106,7 @@ async function cmdSheet(bv, opts = {}) {
     mkdirSync(dirname(out), { recursive: true })
     execFileSync(bin, ['-y', '-threads', '2', '-i', join(tmp, '%02d.jpg'), '-vf', `scale='min(640,iw)':-2,tile=${cols}x${rows}`, '-frames:v', '1', out], { stdio: 'ignore', timeout: ffTimeoutMs() })
     console.log(`拼图: ${out}（${(statSync(out).size / 1024).toFixed(0)} KiB，共 ${picked.length} 帧）`)
+    if (r.actualQn) console.log(`画质: ${QN_LABEL[r.actualQn] || `${r.actualQn}p`}${r.dash ? '（dash 视频流）' : ''}`)
     // T42：九宫格没有时间轴，模型看图不知道「第几格是第几秒」；写一份 manifest 并打一行
     const stepUsed = Number((/-([0-9]+)s$/.exec(r.dir) || [])[1] || opts.step || 0)
     const cellSec = (f, i) => {
@@ -2082,7 +2128,7 @@ async function cmdSheet(bv, opts = {}) {
 async function cmdSubstrip(bv, opts = {}) {
   const step = Number(opts.step) > 0 ? Number(opts.step) : 7
   console.log(`字幕带 ${bv}（每 ${step} 秒一条，竖拼一张图）`)
-  const r = await grabFrames(bv, { step, p: opts.p ?? 1, ffmpeg: opts.ffmpeg, fresh: opts.fresh })
+  const r = await grabFrames(bv, { step, p: opts.p ?? 1, ffmpeg: opts.ffmpeg, fresh: opts.fresh, quality: opts.quality })
   const files = frameList(r.dir, bv)
   if (!files.length) { process.exitCode = 1; console.error('✗ 没抽到帧'); return }
   const take = Math.min(files.length, 12)
@@ -2680,7 +2726,7 @@ async function cmdText(bv, credPath, opts = {}) {
   // ③ 抽帧 OCR（画面文字转文本）
   if (ocrReady()) {
     track(`[track] 画面 OCR: 抽帧…`)
-    const r = await grabFrames(bv, { step: opts.step ?? 0, p: v.p, ffmpeg: opts.ffmpeg })
+    const r = await grabFrames(bv, { step: opts.step ?? 0, p: v.p, ffmpeg: opts.ffmpeg, quality: opts.quality })
     const rOcr = await runOcr(r.dir)
     // 6-14：OCR 崩溃返回 ok:false，不把错误串当识别结果打印落盘
     if (rOcr.ok && rOcr.text) {
@@ -3414,6 +3460,17 @@ try {
   console.error(`✗ ${e?.message ?? e}`)
   process.exit(1)
 }
+// 抽帧画质：不传=360p（匿名即可）；720 多数视频匿名也能拿；1080 往往要登录且走 dash。
+const QUALITY = (() => {
+  const raw = opt('quality')
+  if (raw === undefined || raw === '') return 0
+  const n = Number(String(raw).replace(/p$/i, ''))
+  if (!QUALITY_QN[n]) {
+    console.error(`✗ --quality 只支持 360 / 480 / 720 / 1080（收到：${raw}）`)
+    process.exit(1)
+  }
+  return n
+})()
 const HELP = `用法:
   node look.mjs search <关键词> [--limit 10] [--order pubdate|click] [--days 3]  搜视频
   node look.mjs hot [--limit 10]              综合热门榜（B 站按热度排）
@@ -3423,9 +3480,10 @@ const HELP = `用法:
   node look.mjs comments <BV或链接> [条数] [--format json] [--out 文件]  评论区（仅 B 站）
   node look.mjs danmaku <BV或链接> [--format json] [--out 文件]  弹幕热区（仅 B 站）
   node look.mjs asr <BV或链接或URL> [--ffmpeg 路径] [--asr-max 毫秒] [--head N] [--full]  本地转写（B 站或通用 URL 均可）
-  node look.mjs frames <BV或链接或URL> [--step 2] [--out 目录] [--ffmpeg 路径] [--fresh] [--ocr] [--scene]
+  node look.mjs frames <BV或链接或URL> [--step 2] [--out 目录] [--ffmpeg 路径] [--fresh] [--ocr] [--scene] [--quality 360|480|720|1080]
                                          --scene：吸附画面变化点抽帧（默认关；仅 B 站）
-  node look.mjs sheet <BV或链接> [--grid 3x3] [--step 2]   N 帧拼一张九宫格（仅 B 站）
+                                         --quality：抽帧画质（默认 360p；720 多数视频匿名可用，1080 常需登录）
+  node look.mjs sheet <BV或链接> [--grid 3x3] [--step 2] [--quality 1080]   N 帧拼一张九宫格（仅 B 站）
   node look.mjs substrip <BV或链接> [--step 7]          底部字幕带竖拼一张图（仅 B 站）
   node look.mjs ocr <BV或链接> [--step 2]     抽帧 + OCR 出文字（仅 B 站）
   node look.mjs text <BV或链接或URL> [--cred 凭证路径] [--step 2] [--fast] [--mark-seen] [--verify] [--head N] [--full] [--format json] [--out 文件]
@@ -3476,7 +3534,7 @@ process.on('uncaughtException', (e) => {
 })
 
 // 8-15：未知 flag 给拼写提示（--headd → 你是想用 --head 吗）
-const KNOWN_FLAGS = new Set(['quiet', 'cred', 'days', 'ffmpeg', 'grid', 'key', 'limit', 'order', 'out', 'p', 'step', 'format', 'head', 'fast', 'full', 'fresh', 'mark-seen', 'ocr', 'poll', 'check', 'scene', 'verify', 'asr-max'])
+const KNOWN_FLAGS = new Set(['quiet', 'cred', 'days', 'ffmpeg', 'grid', 'key', 'limit', 'order', 'out', 'p', 'step', 'format', 'head', 'fast', 'full', 'fresh', 'mark-seen', 'ocr', 'poll', 'check', 'scene', 'verify', 'asr-max', 'quality'])
 // ↑ P2（2026-10-28 全量检查）：补 asr-max。它在 VALUE_OPTS（:2769）与实现（:2813）里早就生效，
 //   却不在这张表里——`look.mjs help --asr-max 30000` 会打印「⚠ 未知参数 --asr-max（已忽略）」，
 //   然后真的生效。index.js 的 KNOWN_FLAGS 同款漏项，两处一起补。
@@ -3578,23 +3636,23 @@ try {
   } else if (cmd === 'asr') {
     await cmdAsr(BV, P, opt('ffmpeg'))
   } else if (cmd === 'frames') {
-    await cmdFrames(BV, { step: STEP, p: P, outDir: opt('out'), ffmpeg: opt('ffmpeg'), fresh: flag('fresh'), ocr: flag('ocr'), scene: flag('scene') })
+    await cmdFrames(BV, { step: STEP, p: P, outDir: opt('out'), ffmpeg: opt('ffmpeg'), fresh: flag('fresh'), ocr: flag('ocr'), scene: flag('scene'), quality: QUALITY })
   } else if (cmd === 'sheet') {
     const grid = String(opt('grid') || '3x3').toLowerCase()
     if (!/^[1-6]x[1-6]$/.test(grid)) {
       console.error(`✗ --grid 需要 COLSxROWS（都是 1–6，如 3x3），收到：${grid}`)
       process.exit(1)
     }
-    await cmdSheet(BV, { grid, step: STEP, p: P, ffmpeg: opt('ffmpeg'), fresh: flag('fresh') })
+    await cmdSheet(BV, { grid, step: STEP, p: P, ffmpeg: opt('ffmpeg'), fresh: flag('fresh'), quality: QUALITY })
   } else if (cmd === 'substrip') {
-    await cmdSubstrip(BV, { step: STEP, p: P, ffmpeg: opt('ffmpeg'), fresh: flag('fresh') })
+    await cmdSubstrip(BV, { step: STEP, p: P, ffmpeg: opt('ffmpeg'), fresh: flag('fresh'), quality: QUALITY })
   } else if (cmd === 'ocr') {
     // W-27 残留（2026-10-28 全量检查）：ocr 这条链路的 --ffmpeg 原来没传下去（cmdOcr 把 opts 交给
     //   grabFrames，里面 findFfmpeg(undefined) 回落默认候选），自装 ffmpeg 的用户在 ocr 上走不到自己那份。
     //   注意：verify.mjs 的「全文件禁止无参 findFfmpeg()」抓不到这条——cmdOcr 根本不直接调 findFfmpeg。
-    await cmdOcr(BV, { step: STEP, p: P, ffmpeg: opt('ffmpeg') })
+    await cmdOcr(BV, { step: STEP, p: P, ffmpeg: opt('ffmpeg'), quality: QUALITY })
   } else if (cmd === 'text') {
-    await cmdText(BV, CRED, { step: STEP, p: P, fast: flag('fast'), mark: flag('mark-seen'), verify: flag('verify'), format: opt('format') || 'text', out: opt('out') || '', head: opt('head') || '', full: flag('full'), ffmpeg: opt('ffmpeg') })
+    await cmdText(BV, CRED, { step: STEP, p: P, fast: flag('fast'), mark: flag('mark-seen'), verify: flag('verify'), format: opt('format') || 'text', out: opt('out') || '', head: opt('head') || '', full: flag('full'), ffmpeg: opt('ffmpeg'), quality: QUALITY })
   } else if (cmd === 'local') {
     // W-27（2026-10-28 阶段B-②）：--ffmpeg 在 text/local 这两条链路上是断的——值到了 main 就丢了，
     //   底下 transcribe / grabFrames / probeDur 全用默认候选，自装 ffmpeg 的用户一直走不到自己那份。
