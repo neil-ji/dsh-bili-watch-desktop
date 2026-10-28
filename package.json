@@ -1,0 +1,48 @@
+{
+  "name": "@local/dsh-bili-watch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH 桌面端优先的 B 站视频阅读插件：面板里装依赖、扫码登录、管缓存；对话里用 /bili 或 bili_watch 把视频读成文本。",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "tools/look.mjs",
+    "tools/ocr.py",
+    "scripts",
+    "deps/_bili-asr.py",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# dsh-bili-watch（桌面端重构）bundle patch
+# 只插入本插件自己的宿主行；不改动任何随 DSH 发行的组件。
+# profile 的 dsh.profile.bundles 里出现 @local/dsh-bili-watch 即整层生效。
+- insert:
+    - id: bili-watch
+      name: '@local/dsh-bili-watch'
+      config: {}

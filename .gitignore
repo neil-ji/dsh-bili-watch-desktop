@@ -1,0 +1,6 @@
+node_modules/
+deps/*
+!deps/.gitkeep
+!deps/_bili-asr.py
+*.log
+*.broken-*

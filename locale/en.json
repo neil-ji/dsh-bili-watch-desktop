@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Bilibili Video Reader",
+    "description": "Turns a Bilibili video into text for the model: subtitles, local transcription, frame OCR, plus comments, danmaku peaks, and search; install dependencies, sign in, and manage the cache from its panel."
+  }
+}
