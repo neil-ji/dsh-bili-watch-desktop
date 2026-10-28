@@ -79,6 +79,8 @@ export function apply(ctx) {
           step: Number(flagValue('--step')) || 0,
           extraFrames: Number(flagValue('--extra-frames')) || 0,
           transcript: flagValue('--transcript') || 'auto',
+          start: flagValue('--start'),
+          end: flagValue('--end'),
           signal: invocation?.signal,
         })
         const note = visual.images?.length
