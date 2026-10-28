@@ -219,7 +219,14 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 [data-bw]{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5;}
-[data-bw-page]{max-width:920px;margin:0 auto;padding:22px 24px 48px;display:flex;flex-direction:column;gap:14px;}
+/* 主面板是整页内容，滚动必须自己管：shell 的 main 区不保证提供滚动容器，
+   之前直接铺内容，超过一屏的部分会被裁掉、滚轮也没反应。
+   flex:1 + height:100% 同时兼容「父级是 flex 列」与「父级有确定高度」两种布局。 */
+[data-bw-page]{max-width:920px;margin:0 auto;padding:22px 24px 48px;display:flex;flex-direction:column;gap:14px;
+  flex:1 1 auto;min-height:0;height:100%;max-height:100vh;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;
+  overscroll-behavior:contain;scrollbar-gutter:stable;}
+[data-bw-page]::-webkit-scrollbar{width:10px;}
+[data-bw-page]::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2);border-radius:5px;border:3px solid transparent;background-clip:content-box;}
 [data-bw-head]{display:flex;align-items:flex-start;gap:14px;}
 [data-bw-head-text]{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
 [data-bw-h1]{font-size:17px;font-weight:600;}
