@@ -1,6 +1,7 @@
 # dsh-bili-watch（桌面端重构版）
 
-把 B 站视频读成模型能用的内容：元数据、评论、弹幕热区、AI 字幕、本地转写、抽帧 OCR。
+把 B 站视频读成模型能用的内容：元数据、评论、弹幕热区、AI 字幕、本地转写、抽帧 OCR；
+以及一条 **`visual`：一次调用同时返回「文本稿 + 九宫格画面」**，给多模态模型直接看图。
 提供 `/bili` 斜杠命令、`bili_watch` 工具，以及一个**桌面端优先的侧栏面板**（装依赖、扫码登录、管缓存、调参数）。
 
 > 本项目是 [Sacredbluedragon/dsh-bili-watch](https://github.com/Sacredbluedragon/dsh-bili-watch)（0.3.3，MIT）的衍生重构版，
@@ -100,6 +101,7 @@
 
 ```text
 /bili text BV1xx411c7mD            # 字幕 → 本地转写 → 抽帧 OCR，自动降级
+/bili visual BV1xx411c7mD --step 20 --extra-frames 2   # 文本 + 九宫格 + 2 张单帧
 /bili peek BV1xx411c7mD            # 先判断是口播还是画面（需下载 360p）
 /bili search DeepSeek --days 3     # 最近 3 天发布
 /bili comments BV1xx411c7mD 20     # 评论区
@@ -109,7 +111,33 @@
 ```
 
 模型侧工具 `bili_watch`，`command` 支持
-`search|hot|peek|view|sub|comments|danmaku|asr|frames|sheet|substrip|ocr|text`。
+`search|hot|peek|view|sub|comments|danmaku|asr|frames|sheet|substrip|ocr|text|visual`。
+
+### 图片帧 + 文本稿（`visual`）
+
+```jsonc
+{
+  "command": "visual",
+  "bv": "BV1xx411c7mD",
+  "step": 20,              // 抽帧间隔；不传按视频时长自适应
+  "grid": "3x3",           // 九宫格布局
+  "extraFrames": 2,        // 额外附带 0–3 张单帧（默认 0）
+  "transcript": "auto"     // auto=只试官方字幕（快，默认）｜full=没有字幕再跑本地转写｜off=只要画面
+}
+```
+
+一次调用返回的内容：
+
+1. 一段文本：标题 / UP / 时长、**每格对应的时间点**（`#1=0s #2=30s …`）、字幕全文（超长自动落盘 + 摘要）；
+2. 一张九宫格图（1 张覆盖 9 个场景，最省视觉 token）；
+3. 可选 N 张单帧（对某几格看细节）。
+
+实现上，宿主在 `execute()` 里把图片保存成 DSH 附件（`attachments.saveImage`），
+再由 `render()` 以 `ContentBlock[]` 的形式和文本一起返回——**图片是工具结果的一部分**，
+模型不需要再逐张 `read_image`。九宫格每格的时间戳与画面同源，模型可以直接说「第 80 秒那个镜头」。
+
+> 分辨率上限是源片的 360p（`qn=16`），九宫格每格 640×360；小字/细节有限。
+> 画面类内容优先用九宫格定位，再对 1–2 帧单独看。
 
 ---
 
@@ -154,6 +182,8 @@ plugin_manager install_bundle  target = "<本目录的绝对路径>"
   跨源/非 JSON 请求 403、局域网不可达（服务只绑回环）逐项实测。
 - 安装：GitHub 直连失败时保留真实错误行；镜像重试 5 秒装好 `yt-dlp.exe`（23.5 MB）并通过产物核对。
 - 端到端：`bili_watch command=hot limit=3` 返回真实热榜并写入 `last-run.json`；`view` 返回标题/简介/热评。
+- **`visual` 实测**：横屏（鹅城 FUNK）与竖屏（奶奶买手机）各一条——一次调用分别返回 1 张九宫格 + 字幕文本；
+  竖屏拼图修正了 `scale=640:-1` 的放大会变成 1080×1920（原来被拉到 1920×3414，白烧视觉 token）。
 - **未验证**：面板的实际渲染与浅/深色观感（没有浏览器控制权，只能确认槽位注册与数据链路）。
 
 ---

@@ -2059,7 +2059,7 @@ async function cmdSheet(bv, opts = {}) {
     if (!bin) { process.exitCode = 1; console.error('✗ 找不到 ffmpeg：' + FFMPEG_HINT); return }
     const out = join(CACHE, 'sheets', `${bv}-p${opts.p ?? 1}-${grid}.jpg`)
     mkdirSync(dirname(out), { recursive: true })
-    execFileSync(bin, ['-y', '-threads', '2', '-i', join(tmp, '%02d.jpg'), '-vf', `scale=640:-1,tile=${cols}x${rows}`, '-frames:v', '1', out], { stdio: 'ignore', timeout: ffTimeoutMs() })
+    execFileSync(bin, ['-y', '-threads', '2', '-i', join(tmp, '%02d.jpg'), '-vf', `scale='min(640,iw)':-2,tile=${cols}x${rows}`, '-frames:v', '1', out], { stdio: 'ignore', timeout: ffTimeoutMs() })
     console.log(`拼图: ${out}（${(statSync(out).size / 1024).toFixed(0)} KiB，共 ${picked.length} 帧）`)
     // T42：九宫格没有时间轴，模型看图不知道「第几格是第几秒」；写一份 manifest 并打一行
     const stepUsed = Number((/-([0-9]+)s$/.exec(r.dir) || [])[1] || opts.step || 0)
@@ -2099,7 +2099,7 @@ async function cmdSubstrip(bv, opts = {}) {
     if (!bin) { process.exitCode = 1; console.error('✗ 找不到 ffmpeg：' + FFMPEG_HINT); return }
     const out = join(CACHE, 'sheets', `${bv}-p${opts.p ?? 1}-substrip.jpg`)
     mkdirSync(dirname(out), { recursive: true })
-    execFileSync(bin, ['-y', '-threads', '2', '-i', join(tmp, '%02d.jpg'), '-vf', `crop=iw:ih*0.20:0:ih*0.80,scale=1280:-1,tile=1x${take}`, '-frames:v', '1', out], { stdio: 'ignore', timeout: ffTimeoutMs() })
+    execFileSync(bin, ['-y', '-threads', '2', '-i', join(tmp, '%02d.jpg'), '-vf', `crop=iw:ih*0.20:0:ih*0.80,scale='min(1280,iw)':-2,tile=1x${take}`, '-frames:v', '1', out], { stdio: 'ignore', timeout: ffTimeoutMs() })
     console.log(`字幕带: ${out}（${(statSync(out).size / 1024).toFixed(0)} KiB，共 ${take} 条）`)
     console.log('一张图里是整片底部字幕；硬字幕视频用它比逐帧 OCR 省很多。')
   } finally {

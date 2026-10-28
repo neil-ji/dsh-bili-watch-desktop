@@ -22,6 +22,7 @@ import { matchSingleVideoLink, textOfUserMessage } from './lib/hints.js'
 import { trimForModel } from './lib/look.js'
 import { mountRoutes } from './lib/routes.js'
 import { createToolDefinition, lookup, parseCommandLine } from './lib/tool.js'
+import { buildVisual } from './lib/visual.js'
 
 export const name = '@local/dsh-bili-watch'
 /** 命令与 HTTP 两个服务是硬依赖：没有它们，插件在桌面端没有意义。 */
@@ -62,10 +63,29 @@ export function apply(ctx) {
     name: 'bili',
     description: '看 B 站视频：字幕 → 本地转写 → 抽帧 OCR，输出最可信的一份内容；也支持搜索 / 热榜 / 评论 / 弹幕。',
     input: {
-      hint: '<text|view|peek|sub|comments|danmaku|asr|frames|sheet|substrip|ocr|search|hot|login|clean> [BV 或链接] [--p N] [--step 秒] [--format srt|json|md|txt] [--out 相对路径] [--head N] [--full] [--fast] [--verify] [--days N] [--limit N] [--fresh]',
+      hint: '<text|visual|view|peek|sub|comments|danmaku|asr|frames|sheet|substrip|ocr|search|hot|login|clean> [BV 或链接] [--p N] [--step 秒] [--grid 3x3] [--extra-frames N] [--format srt|json|md|txt] [--out 相对路径] [--head N] [--full] [--fast] [--verify] [--days N] [--limit N] [--fresh]',
     },
     handler: async (invocation) => {
       const parsed = parseCommandLine(invocation?.rawInput)
+      const flagValue = (name) => {
+        const at = (parsed.extra || []).indexOf(name)
+        return at >= 0 ? parsed.extra[at + 1] : undefined
+      }
+      // /bili visual：命令通道只能回文本，图片要走 bili_watch 工具（宿主把图存成附件随结果给模型）。
+      if (parsed.command === 'visual') {
+        const visual = await buildVisual(ctx, {
+          bv: parsed.bv,
+          grid: flagValue('--grid'),
+          step: Number(flagValue('--step')) || 0,
+          extraFrames: Number(flagValue('--extra-frames')) || 0,
+          transcript: flagValue('--transcript') || 'auto',
+          signal: invocation?.signal,
+        })
+        const note = visual.images?.length
+          ? `\n\n（命令通道只回文本；这次已生成 ${visual.images.length} 张图，要让我直接看图请用工具：bili_watch command=visual bv=${parsed.bv}）`
+          : ''
+        return { kind: visual.ok ? 'success' : 'error', text: trimForModel(`${visual.text}${note}`, 'visual', parsed.bv, {}) }
+      }
       const result = await lookup(parsed)
       const full = (parsed.extra || []).includes('--full')
       const headAt = (parsed.extra || []).indexOf('--head')
@@ -83,7 +103,7 @@ export function apply(ctx) {
   })()
   if (tools?.register) {
     try {
-      ctx.effect(() => tools.register(createToolDefinition()), 'bili-watch: bili_watch 工具')
+      ctx.effect(() => tools.register(createToolDefinition({ ctx })), 'bili-watch: bili_watch 工具')
     } catch (error) {
       addWarning(`bili_watch 工具注册失败：${String(error?.message || error)}`)
     }
